@@ -3,7 +3,7 @@ import torch.nn
 import numpy as np
 import os
 import os.path
-import nibabel
+import SimpleITK as sitk
 
 
 class BRATSDataset(torch.utils.data.Dataset):
@@ -45,9 +45,9 @@ class BRATSDataset(torch.utils.data.Dataset):
         out = []
         filedict = self.database[x]
         for seqtype in self.seqtypes:
-            nib_img = nibabel.load(filedict[seqtype])
+            img = sitk.ReadImage(filedict[seqtype])
             path=filedict[seqtype]
-            out.append(torch.tensor(nib_img.get_fdata()))
+            out.append(torch.tensor(sitk.GetArrayFromImage(img)))
         out = torch.stack(out)
         if self.test_flag:
             image=out
