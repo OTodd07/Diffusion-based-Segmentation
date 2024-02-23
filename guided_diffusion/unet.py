@@ -15,6 +15,7 @@ from .nn import (
     timestep_embedding,
 )
 
+NUM_CLASSES = 3
 
 class AttentionPool2d(nn.Module):
     """
@@ -233,6 +234,7 @@ class ResBlock(TimestepBlock):
     def _forward(self, x, emb):
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            #in_rest, in_conv = self.in_layers[:-NUM_CLASSES], self.in_layers[-NUM_CLASSES]
             h = in_rest(x)
             h = self.h_upd(h)
             x = self.x_upd(x)

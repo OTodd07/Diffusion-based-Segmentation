@@ -184,8 +184,8 @@ class TrainLoop:
                     batch, cond = next(data_iter)
 
             self.run_step(batch, cond)
+            print(i)
 
-           
             i += 1
           
             if self.step % self.log_interval == 0:

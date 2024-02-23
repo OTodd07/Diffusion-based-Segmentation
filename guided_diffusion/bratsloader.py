@@ -59,7 +59,16 @@ class BRATSDataset(torch.utils.data.Dataset):
             label = out[-1, ...][None, ...]
             image = image[..., 8:-8, 8:-8]      #crop to a size of (224, 224)
             label = label[..., 8:-8, 8:-8]
-            label=torch.where(label > 0, 1, 0).float()  #merge all tumor classes into one
+
+
+            label = label.numpy()
+            multi_label = np.zeros((3,224,224))
+            for i in range(1,4):
+                np.putmask(multi_label[i-1,:,:], label == i, i > 0)
+
+            label = torch.Tensor(multi_label)
+            
+            #label=torch.where(label > 0, 1, 0).float()  #merge all tumor classes into one
             return (image, label)
 
     def __len__(self):
