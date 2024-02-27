@@ -10,7 +10,7 @@ from torchvision.utils import save_image
 import torch
 import math
 from visdom import Visdom
-viz = Visdom(port=8850)
+#viz = Visdom(port=8850)
 import numpy as np
 import torch as th
 from .train_util import visualize
@@ -578,7 +578,7 @@ class GaussianDiffusion:
                 t = th.tensor([i] * shape[0], device=device)
                 if i%100==0:
                     print('sampling step', i)
-                    viz.image(visualize(img.cpu()[0, -1,...]), opts=dict(caption="sample"+ str(i) ))
+                    #viz.image(visualize(img.cpu()[0, -1,...]), opts=dict(caption="sample"+ str(i) ))
 
                 with th.no_grad():
                     if img.shape != (1, 4 + NUM_CLASSES, 224, 224):
