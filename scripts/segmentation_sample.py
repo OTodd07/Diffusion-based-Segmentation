@@ -16,8 +16,10 @@ import numpy as np
 import time
 import torch as th
 import torch.distributed as dist
+from torch.nn.parallel.distributed import DistributedDataParallel
 from guided_diffusion import dist_util, logger
 from guided_diffusion.bratsloader import BRATSDataset
+from guided_diffusion.cardiacloader import CardiacDataset
 from guided_diffusion.script_util import (
     NUM_CLASSES,
     model_and_diffusion_defaults,
@@ -25,6 +27,7 @@ from guided_diffusion.script_util import (
     add_dict_to_argparser,
     args_to_dict,
 )
+from guided_diffusion.nn import mean_flat
 seed=10
 th.manual_seed(seed)
 th.cuda.manual_seed_all(seed)
@@ -47,20 +50,25 @@ def main():
     dist_util.setup_dist()
     logger.configure()
 
+    colour_map = np.array([[0,0,0], [255,0,0], [0,255,0], [0,0,255], [255,255,0], [0,255,255], [255,0,255],[255,255,255]])
+
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
 
-    ds = BRATSDataset(args.data_dir, test_flag=True)
+    #ds = BRATSDataset(args.data_dir, test_flag=True)
+    ds = CardiacDataset(args.data_dir, test_flag=True)
     datal = th.utils.data.DataLoader(
         ds,
         batch_size=1,
         shuffle=False)
     data = iter(datal)
     all_images = []
+    model.to(th.device(f"cuda"))
+    model = DistributedDataParallel(model, device_ids=[0])
     model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
+        dist_util.load_state_dict(args.model_path, map_location=th.device('cuda'))
     )
     model.to(dist_util.dev())
     if args.use_fp16:
@@ -71,38 +79,36 @@ def main():
 
         p += 1
 
-        for i in range(50):
+        for i in range(16):
             b, m, path = next(data)  #should return an image from the dataloader "data"
-        c = th.randn_like(b[:, :3, ...])
+        
+        # b, m, path = next(data)  #should return an image from the dataloader "data"
+
+        m_start = th.clone(m)
+    
+        c = th.randn_like(m)
+
         img = th.cat((b, c), dim=1)     #add a noise channel$
-        slice_ID=path[0].split("/", -1)[3]
-
-        # viz.image(visualize(img[0,0,...]), opts=dict(caption="img input0"))
-        # viz.image(visualize(img[0, 1, ...]), opts=dict(caption="img input1"))
-        # viz.image(visualize(img[0, 2, ...]), opts=dict(caption="img input2"))
-        # viz.image(visualize(img[0, 3, ...]), opts=dict(caption="img input3"))
-        # viz.image(visualize(img[0, 4, ...]), opts=dict(caption="img input4"))
-
+     
         logger.log("sampling...")
 
         start = th.cuda.Event(enable_timing=True)
         end = th.cuda.Event(enable_timing=True)
+        temp = m.numpy()
+        np.putmask(temp, temp == -1 , 0)
+        m = th.tensor(temp)
 
         arg_max_mask = (th.argmax(m, dim=1) + 1).cpu().numpy()
         val_max_mask = th.max(m,dim=1)[0].cpu().numpy()
         np.putmask(arg_max_mask, val_max_mask == 0, 0)
         m = th.Tensor(arg_max_mask)
-        if len(np.unique(arg_max_mask)) < 4:
-            continue
-    
-        rgb_m = np.zeros((3,224,224), dtype=np.uint8)
-        for i in range(1,4):
-            np.putmask(rgb_m[i-1,:,:], arg_max_mask == i, 255)
-        mm = th.Tensor(rgb_m)
+  
 
-        plt.imshow(rgb_m.transpose(1,2,0))
+        rgb_m = colour_map[arg_max_mask.squeeze()].transpose().transpose(1,2,0)
+ 
+        plt.imshow(rgb_m)
         plt.axis('off')
-        plt.savefig(os.path.join("rgb_samples_train", f"mask_{p}.png"), bbox_inches="tight", pad_inches=0)
+        plt.savefig(os.path.join("cardiac_64_samples", f"mask_{p}.png"), bbox_inches="tight", pad_inches=0)
 
 
         for i in range(args.num_ensemble):  #this is for the generation of an ensemble of 5 masks.
@@ -121,29 +127,17 @@ def main():
             end.record()
             th.cuda.synchronize()
             print('time for 1 sample', start.elapsed_time(end))  #time measurement for the generation of 1 sample
+       
             arg_max_sample = (th.argmax(sample, dim=1) + 1).cpu().numpy()
             val_max_sample = th.max(sample,dim=1)[0].cpu().numpy()
             np.putmask(arg_max_sample, val_max_sample < 0.5, 0)
-            rgb_sample = np.zeros((3,224,224), dtype=np.uint8)
-            for j in range(1,4):
-                np.putmask(rgb_sample[j-1,:,:], arg_max_sample == j, 255)
-            s = th.Tensor(rgb_sample)
-
-
-
-            
-           
-         
+     
+            rgb_sample = colour_map[arg_max_sample.squeeze()].transpose()
 
             plt.imshow(rgb_sample.transpose(1,2,0))
             plt.axis('off')
-            plt.savefig(os.path.join("rgb_samples_train", f"sample_{p}_{i}.png"), bbox_inches="tight", pad_inches=0)
+            plt.savefig(os.path.join("cardiac_64_samples", f"sample_{p}_{i}.png"), bbox_inches="tight", pad_inches=0)
 
-      
-
-            #s = th.tensor(sample)
-            #viz.image(visualize(sample[0, 0, ...]), opts=dict(caption="sampled output"))
-            th.save(s, './output-27-02/'+str(slice_ID)+'_output'+str(i)) #save the generated mask
 
 def create_argparser():
     defaults = dict(

@@ -13,18 +13,23 @@ from visdom import Visdom
 #viz = Visdom(port=8850)
 import numpy as np
 import torch as th
+import torch.distributed as dist
 from .train_util import visualize
 from .nn import mean_flat
 from .losses import normal_kl, discretized_gaussian_log_likelihood
 from scipy import ndimage
 from torchvision import transforms
+import inspect
 def standardize(img):
     mean = th.mean(img)
     std = th.std(img)
     img = (img - mean) / std
     return img
 
-NUM_CLASSES = 3
+NUM_CLASSES = 7
+NUM_IMG_CHAN = 1
+IMG_SIZE = 64
+
 
 def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
     """
@@ -174,6 +179,7 @@ class GaussianDiffusion:
             / (1.0 - self.alphas_cumprod)
         )
 
+       
     def q_mean_variance(self, x_start, t):
         """
         Get the distribution q(x_t | x_0).
@@ -260,6 +266,7 @@ class GaussianDiffusion:
         assert t.shape == (B,)
         model_output = model(x, self._scale_timesteps(t), **model_kwargs)
         x=x[:,-NUM_CLASSES:,...]
+       
         # x=x[:,-1:,...]  #loss is only calculated on the last channel, not on the input brain MR image
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -512,8 +519,10 @@ class GaussianDiffusion:
         img = img.to(device)
         #noise = th.randn_like(img[:, :1, ...]).to(device)
         #x_noisy = torch.cat((img[:, :-1,  ...], noise), dim=1)  #add noise as the last channel
+        
         noise = th.randn_like(img[:, :NUM_CLASSES, ...]).to(device)
         x_noisy = torch.cat((img[:, :-NUM_CLASSES,  ...], noise), dim=1)  #add noise as the last channel
+        
         img=img.to(device)
 
         for sample in self.p_sample_loop_progressive(
@@ -566,6 +575,7 @@ class GaussianDiffusion:
 
         #org_MRI = img[:, :-1, ...]      #original brain MR image
         org_MRI = img[:, :-NUM_CLASSES, ...]      #original brain MR image
+    
         
         if progress:
             # Lazy import so that we don't depend on tqdm.
@@ -581,7 +591,9 @@ class GaussianDiffusion:
                     #viz.image(visualize(img.cpu()[0, -1,...]), opts=dict(caption="sample"+ str(i) ))
 
                 with th.no_grad():
-                    if img.shape != (1, 4 + NUM_CLASSES, 224, 224):
+                    if img.shape != (1, NUM_CLASSES + NUM_IMG_CHAN, IMG_SIZE, IMG_SIZE):
+                        # print("here")
+                        # print(img.shape)
                         img = torch.cat((org_MRI,img), dim=1)       #in every step, make sure to concatenate the original image to the sampled segmentation mask
 
                     out = self.p_sample(
@@ -889,6 +901,7 @@ class GaussianDiffusion:
                  - 'output': a shape [N] tensor of NLLs or KLs.
                  - 'pred_xstart': the x_0 predictions.
         """
+
         true_mean, _, true_log_variance_clipped = self.q_posterior_mean_variance(
             x_start=x_start, x_t=x_t, t=t
         )
@@ -925,6 +938,9 @@ class GaussianDiffusion:
         :return: a dict with the key "loss" containing a tensor of shape [N].
                  Some mean or variance settings may also have other keys.
         """
+
+        metrics = {"Start MSE":0, "Fid":0, "Noise MSE": 0}
+
         if model_kwargs is None:
             model_kwargs = {}
         if noise is None:
@@ -934,12 +950,17 @@ class GaussianDiffusion:
 
         mask = x_start[:, -NUM_CLASSES:, ...]
         #res = torch.where(mask > 0, 1, 0)   #merge all tumor classes into one to get a binary segmentation mask
-        res = mask
+        #print(torch.unique(mask))
+        #res = mask
+        res = torch.where(mask > -10000, mask, mask)
 
         res_t = self.q_sample(res, t, noise=noise)     #add noise to the segmentation channel
         x_t=x_start.float()
         x_t[:, -NUM_CLASSES:, ...]=res_t.float()
+  
         terms = {}
+        # print(t)
+        # print(torch.unique(res))
 
 
         if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
@@ -980,12 +1001,29 @@ class GaussianDiffusion:
             terms["mse"] = mean_flat((target - model_output) ** 2)
 
 
-            print(f"Start_pred MSE: {mean_flat((mask - start_pred) ** 2).sum() / B}")
-            print(f"Diff MSE: {mean_flat((target- model_output) ** 2).sum() / B}")
-            if "vb" in terms:
-                terms["loss"] = terms["mse"] + terms["vb"]
-            else:
-                terms["loss"] = terms["mse"]
+            diff_part = (res - start_pred)** 2
+            mult_part = (res * start_pred)
+            fid = (1 - diff_part.sum(dim=list(range(1, len(diff_part.shape)))) / mult_part.sum(dim=list(range(1, len(mult_part.shape))))).sum() / B
+
+            # print(f"Start_pred MSE: {mean_flat((res - start_pred) ** 2).sum() / B}")
+            # print(f"Start_pred Fidelity: {fid}")
+            # print(f"Diff MSE: {mean_flat((target- model_output) ** 2).sum() / B}")
+ 
+            metrics["Start MSE"] = mean_flat((res - start_pred) ** 2).sum() / B
+            metrics["Fid"] = fid
+            metrics["Noise MSE"] = mean_flat((target- model_output) ** 2).sum() / B
+
+            dist.barrier()
+            reduced = torch.stack([torch.tensor(metrics[k]).cuda() for k in metrics])
+            dist.all_reduce(reduced, dist.ReduceOp.SUM)
+            print(f"Start_pred MSE: {reduced[0].item()}")
+            print(f"Start_pred Fidelity: {reduced[1].item()}")
+            print(f"Diff MSE: {reduced[2].item()}")
+            # if "vb" in terms:
+            #     terms["loss"] = terms["mse"] + terms["vb"]
+            # else:
+            #     terms["loss"] = terms["mse"]
+            terms["loss"] = terms["mse"]
 
         else:
             raise NotImplementedError(self.loss_type)

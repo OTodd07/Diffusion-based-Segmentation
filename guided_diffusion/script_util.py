@@ -5,7 +5,8 @@ from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
 from .unet import SuperResModel, UNetModel, EncoderUNetModel
 
-NUM_CLASSES = 2
+NUM_CLASSES = 8
+NUM_IN_CHANNELS = 1
 
 
 def diffusion_defaults():
@@ -165,9 +166,9 @@ def create_model(
 
     return UNetModel(
         image_size=image_size,
-        in_channels=7,
+        in_channels=NUM_IN_CHANNELS + NUM_CLASSES - 1,
         model_channels=num_channels,
-        out_channels=6,#(3 if not learn_sigma else 6),
+        out_channels=2 * (NUM_CLASSES - 1),#(3 if not learn_sigma else 6),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,

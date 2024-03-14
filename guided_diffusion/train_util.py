@@ -8,7 +8,7 @@ import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 
-from . import dist_util, logger
+from . import dist_util, logger, ddp_utils
 from .fp16_util import MixedPrecisionTrainer
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
@@ -103,24 +103,26 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
-        else:
-            if dist.get_world_size() > 1:
-                logger.warn(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
-            self.use_ddp = False
-            self.ddp_model = self.model
+        # if th.cuda.is_available():
+        #     self.use_ddp = True
+        #     self.ddp_model = DDP(
+        #         self.model,
+        #         device_ids=[dist_util.dev()],
+        #         output_device=dist_util.dev(),
+        #         broadcast_buffers=False,
+        #         bucket_cap_mb=128,
+        #         find_unused_parameters=False,
+        #     )
+        # else:
+        #     if dist.get_world_size() > 1:
+        #         logger.warn(
+        #             "Distributed training requires CUDA. "
+        #             "Gradients will not be synchronized properly!"
+        #         )
+        #     self.use_ddp = False
+        #     self.ddp_model = self.model
+        self.use_ddp = True
+        self.ddp_model = self.model
 
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -130,13 +132,15 @@ class TrainLoop:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+                # self.model.load_state_dict(torch.load(resume_checkpoint)['model_state_dict'])
+
                 self.model.load_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
+                    ddp_utils.load_state_dict(
+                        resume_checkpoint, map_location=th.device(f"cuda")
                     )
                 )
 
-        dist_util.sync_params(self.model.parameters())
+        ddp_utils.sync_params(self.model.parameters())
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -161,13 +165,14 @@ class TrainLoop:
         )
         if bf.exists(opt_checkpoint):
             logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-            state_dict = dist_util.load_state_dict(
-                opt_checkpoint, map_location=dist_util.dev()
+            state_dict = ddp_utils.load_state_dict(
+                opt_checkpoint, map_location=th.device(f"cuda")
             )
             self.opt.load_state_dict(state_dict)
 
     def run_loop(self):
         i = 0
+        self.dataloader.sampler.set_epoch(i)
         data_iter = iter(self.dataloader)
         while (
             not self.lr_anneal_steps
@@ -180,6 +185,7 @@ class TrainLoop:
             except StopIteration:
                     # StopIteration is thrown if dataset ends
                     # reinitialize data loader
+                    self.dataloader.sampler.set_epoch(i)
                     data_iter = iter(self.dataloader)
                     batch, cond = next(data_iter)
 
@@ -214,16 +220,18 @@ class TrainLoop:
 
     def forward_backward(self, batch, cond):
 
+      
+
         self.mp_trainer.zero_grad()
         for i in range(0, batch.shape[0], self.microbatch):
-            micro = batch[i : i + self.microbatch].to(dist_util.dev())
+            micro = batch[i : i + self.microbatch].to(th.device(f"cuda"))
             micro_cond = {
-                k: v[i : i + self.microbatch].to(dist_util.dev())
+                k: v[i : i + self.microbatch].to(th.device(f"cuda"))
                 for k, v in cond.items()
             }
 
             last_batch = (i + self.microbatch) >= batch.shape[0]
-            t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
+            t, weights = self.schedule_sampler.sample(micro.shape[0], th.device(f"cuda"))
 
             compute_losses = functools.partial(
                 self.diffusion.training_losses_segmentation,
